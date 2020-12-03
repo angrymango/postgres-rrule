@@ -35,6 +35,7 @@ SELECT results_eq(
   'testMonthlyInterval'
 );
 
+select set_config('_rrule.infinity', 'P200Y', false);
 
 SELECT results_eq(
   $$ SELECT * FROM occurrences(
@@ -49,6 +50,8 @@ SELECT results_eq(
   $$,
   'testYearlyIntervalLarge'
 );
+
+select set_config('_rrule.infinity', 'P10Y', false);
 
 SELECT results_eq(
   $$ SELECT * FROM occurrences(

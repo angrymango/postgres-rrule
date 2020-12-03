@@ -27,7 +27,7 @@ SELECT is(
     '(YEARLY,1,,,,,,,,,,,,MO)'::RRULE,
     '1901-01-01 00:00:00'::TIMESTAMP
   ),
-  '1902-01-01 00:00:00'::TIMESTAMP,
+  timezone('utc', now()) + interval 'P10Y', --  '1902-01-01 00:00:00'::TIMESTAMP
   'No until or count.'
 );
 

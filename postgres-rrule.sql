@@ -222,7 +222,10 @@ RETURNS TIMESTAMP AS $$
   FROM (
     SELECT "rrule"."until"
     UNION
-    SELECT "dtstart" + _rrule.build_interval("rrule"."interval", "rrule"."freq") * COALESCE("rrule"."count", CASE WHEN "rrule"."until" IS NOT NULL THEN NULL ELSE 1 END) AS "until"
+      SELECT least (
+        "dtstart" + _rrule.build_interval("rrule"."interval", "rrule"."freq") * COALESCE("rrule"."count", CASE WHEN "rrule"."until" IS NOT NULL THEN NULL ELSE 100000 END),
+        timezone('utc', now()) + COALESCE(current_setting('_rrule.infinity', true), 'P10Y')::INTERVAL
+      ) AS "until"
   ) "until" GROUP BY ();
 
 $$ LANGUAGE SQL IMMUTABLE STRICT;
