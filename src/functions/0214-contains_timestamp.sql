@@ -8,7 +8,7 @@ BEGIN
   SELECT COUNT(*) > 0
   INTO inSet
   FROM _rrule.after($1, $2 - INTERVAL '1 month') "ts"
-  WHERE "ts"::date = $2::date;
+  WHERE $2 <@ "ts";
 
   RETURN inSet;
 END;

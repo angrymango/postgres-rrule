@@ -1,9 +1,9 @@
-
 CREATE OR REPLACE FUNCTION _rrule.occurrences(
   "rrule" _rrule.RRULE,
-  "dtstart" TIMESTAMP
+  "dtstart" TIMESTAMP,
+  "duration" INTERVAL
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   WITH "starts" AS (
     SELECT "start"
     FROM _rrule.all_starts($1, $2) "start"
@@ -32,24 +32,24 @@ RETURNS SETOF TIMESTAMP AS $$
       "occurrence"
     FROM "ordered"
   )
-  SELECT "occurrence"
+  SELECT tsrange("occurrence", "occurrence" + $3, '[]')
   FROM "tagged"
   WHERE "row_number" <= "rrule"."count"
   OR "rrule"."count" IS NULL
   ORDER BY "occurrence";
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" _rrule.RRULE, "dtstart" TIMESTAMP, "between" TSRANGE)
-RETURNS SETOF TIMESTAMP AS $$
+CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" _rrule.RRULE, "dtstart" TIMESTAMP, "duration" INTERVAL, "between" TSRANGE)
+RETURNS SETOF TSRANGE AS $$
   SELECT "occurrence"
-  FROM _rrule.occurrences("rrule", "dtstart") "occurrence"
+  FROM _rrule.occurrences("rrule", "dtstart", "duration") "occurrence"
   WHERE "occurrence" <@ "between";
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" TEXT, "dtstart" TIMESTAMP, "between" TSRANGE)
-RETURNS SETOF TIMESTAMP AS $$
+CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" TEXT, "dtstart" TIMESTAMP, "duration" INTERVAL, "between" TSRANGE)
+RETURNS SETOF TSRANGE AS $$
   SELECT "occurrence"
-  FROM _rrule.occurrences(_rrule.rrule("rrule"), "dtstart") "occurrence"
+  FROM _rrule.occurrences(_rrule.rrule("rrule"), "dtstart", "duration") "occurrence"
   WHERE "occurrence" <@ "between";
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
@@ -57,30 +57,30 @@ CREATE OR REPLACE FUNCTION _rrule.occurrences(
   "rruleset" _rrule.RRULESET,
   "tsrange" TSRANGE
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   WITH "rrules" AS (
     SELECT
       "rruleset"."dtstart",
-      "rruleset"."dtend",
-      "rruleset"."rrule"
+      "rruleset"."rrule",
+      _rrule.build_duration("rruleset"."dtstart", "rruleset"."dtend", "rruleset"."duration") AS "duration"
   ),
   "rdates" AS (
-    SELECT _rrule.occurrences("rrule", "dtstart", "tsrange") AS "occurrence"
+    SELECT _rrule.occurrences("rrule", "dtstart", "duration", "tsrange") AS "occurrence"
     FROM "rrules"
     UNION
-    SELECT unnest("rruleset"."rdate") AS "occurrence"
+    SELECT tsrange(o, o + "duration", '[]') AS "occurrence" FROM unnest("rruleset"."rdate") AS o, "rrules"
   ),
   "exrules" AS (
     SELECT
       "rruleset"."dtstart",
-      "rruleset"."dtend",
-      "rruleset"."exrule"
+      "rruleset"."exrule",
+      _rrule.build_duration("rruleset"."dtstart", "rruleset"."dtend", "rruleset"."duration") AS "duration"
   ),
   "exdates" AS (
-    SELECT _rrule.occurrences("exrule", "dtstart", "tsrange") AS "occurrence"
+    SELECT _rrule.occurrences("exrule", "dtstart", "duration", "tsrange") AS "occurrence"
     FROM "exrules"
     UNION
-    SELECT unnest("rruleset"."exdate") AS "occurrence"
+    SELECT tsrange(o, o + "duration", '[]') AS "occurrence" FROM unnest("rruleset"."exdate") AS o, "rrules"
   )
   SELECT "occurrence" FROM "rdates"
   EXCEPT
@@ -89,7 +89,7 @@ RETURNS SETOF TIMESTAMP AS $$
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.occurrences("rruleset" _rrule.RRULESET)
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   SELECT _rrule.occurrences("rruleset", '(,)'::TSRANGE);
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
@@ -98,7 +98,7 @@ CREATE OR REPLACE FUNCTION _rrule.occurrences(
   "tsrange" TSRANGE
   -- TODO: add a default limit and then use that limit from `first` and `last`
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
 DECLARE
   i int;
   lim int;
@@ -107,7 +107,7 @@ BEGIN
   lim := array_length("rruleset_array", 1);
 
   IF lim IS NULL THEN
-    q := 'VALUES (NULL::TIMESTAMP) LIMIT 0;';
+    q := 'VALUES (NULL::TSRANGE) LIMIT 0;';
   ELSE
     FOR i IN 1..lim
     LOOP

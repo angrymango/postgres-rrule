@@ -49,7 +49,8 @@ CREATE TABLE _rrule.RRULESET (
   "rrule" _rrule.RRULE,
   "exrule" _rrule.RRULE,
   "rdate" TIMESTAMP[],
-  "exdate" TIMESTAMP[]
+  "exdate" TIMESTAMP[],
+  "duration" INTERVAL
 );
 
 
@@ -309,7 +310,15 @@ BEGIN
 
 END;
 $$ LANGUAGE plpgsql STRICT IMMUTABLE;
-CREATE OR REPLACE FUNCTION _rrule.validate_rrule (result _rrule.RRULE)
+CREATE OR REPLACE FUNCTION _rrule.build_duration("dtstart" TIMESTAMP, "dtend" TIMESTAMP, "duration" INTERVAL)
+RETURNS INTERVAL AS $$
+    SELECT
+        CASE 
+            WHEN $2 IS NOT NULL THEN $2 - $1
+            WHEN $3 IS NOT NULL THEN $3
+            ELSE 'P0'::INTERVAL 
+        END;
+$$ LANGUAGE SQL IMMUTABLE;CREATE OR REPLACE FUNCTION _rrule.validate_rrule (result _rrule.RRULE)
 RETURNS void AS $$
 BEGIN
   -- FREQ is required
@@ -429,14 +438,18 @@ CREATE OR REPLACE FUNCTION _rrule.rruleset (TEXT)
 RETURNS _rrule.RRULESET AS $$
   WITH "dtstart-line" AS (SELECT _rrule.parse_line($1::text, 'DTSTART') as "x"),
   "dtend-line" AS (SELECT _rrule.parse_line($1::text, 'DTEND') as "x"),
-  "exrule-line" AS (SELECT _rrule.parse_line($1::text, 'EXRULE') as "x")
+  "exrule-line" AS (SELECT _rrule.parse_line($1::text, 'EXRULE') as "x"),
+  "rdate-line" AS (SELECT _rrule.parse_line($1::text, 'RDATE') as "x"),
+  "exdate-line" AS (SELECT _rrule.parse_line($1::text, 'EXDATE') as "x"),
+  "duration-line" AS (SELECT _rrule.parse_line($1::text, 'DURATION') as "x")
   SELECT
     (SELECT "x"::timestamp FROM "dtstart-line" LIMIT 1) AS "dtstart",
     (SELECT "x"::timestamp FROM "dtend-line" LIMIT 1) AS "dtend",
     (SELECT _rrule.rrule($1::text) "rrule") as "rrule",
     (SELECT _rrule.rrule("x"::text) "rrule" FROM "exrule-line") as "exrule",
-    NULL::TIMESTAMP[] "rdate",
-    NULL::TIMESTAMP[] "exdate";
+    (SELECT (regexp_split_to_array("x"::text, ','))::TIMESTAMP[] from "rdate-line" AS "rdate"),
+    (SELECT (regexp_split_to_array("x"::text, ','))::TIMESTAMP[] from "exdate-line" AS "exdate"),
+    (SELECT "x"::interval FROM "duration-line" LIMIT 1) AS "duration";
 $$ LANGUAGE SQL IMMUTABLE STRICT;
 
 -- All of the function(rrule, ...) forms also accept a text argument, which will
@@ -472,12 +485,12 @@ END;
 $$ LANGUAGE plpgsql STRICT IMMUTABLE;
 
 
-
 CREATE OR REPLACE FUNCTION _rrule.occurrences(
   "rrule" _rrule.RRULE,
-  "dtstart" TIMESTAMP
+  "dtstart" TIMESTAMP,
+  "duration" INTERVAL
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   WITH "starts" AS (
     SELECT "start"
     FROM _rrule.all_starts($1, $2) "start"
@@ -506,24 +519,24 @@ RETURNS SETOF TIMESTAMP AS $$
       "occurrence"
     FROM "ordered"
   )
-  SELECT "occurrence"
+  SELECT tsrange("occurrence", "occurrence" + $3, '[]')
   FROM "tagged"
   WHERE "row_number" <= "rrule"."count"
   OR "rrule"."count" IS NULL
   ORDER BY "occurrence";
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" _rrule.RRULE, "dtstart" TIMESTAMP, "between" TSRANGE)
-RETURNS SETOF TIMESTAMP AS $$
+CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" _rrule.RRULE, "dtstart" TIMESTAMP, "duration" INTERVAL, "between" TSRANGE)
+RETURNS SETOF TSRANGE AS $$
   SELECT "occurrence"
-  FROM _rrule.occurrences("rrule", "dtstart") "occurrence"
+  FROM _rrule.occurrences("rrule", "dtstart", "duration") "occurrence"
   WHERE "occurrence" <@ "between";
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" TEXT, "dtstart" TIMESTAMP, "between" TSRANGE)
-RETURNS SETOF TIMESTAMP AS $$
+CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" TEXT, "dtstart" TIMESTAMP, "duration" INTERVAL, "between" TSRANGE)
+RETURNS SETOF TSRANGE AS $$
   SELECT "occurrence"
-  FROM _rrule.occurrences(_rrule.rrule("rrule"), "dtstart") "occurrence"
+  FROM _rrule.occurrences(_rrule.rrule("rrule"), "dtstart", "duration") "occurrence"
   WHERE "occurrence" <@ "between";
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
@@ -531,30 +544,30 @@ CREATE OR REPLACE FUNCTION _rrule.occurrences(
   "rruleset" _rrule.RRULESET,
   "tsrange" TSRANGE
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   WITH "rrules" AS (
     SELECT
       "rruleset"."dtstart",
-      "rruleset"."dtend",
-      "rruleset"."rrule"
+      "rruleset"."rrule",
+      _rrule.build_duration("rruleset"."dtstart", "rruleset"."dtend", "rruleset"."duration") AS "duration"
   ),
   "rdates" AS (
-    SELECT _rrule.occurrences("rrule", "dtstart", "tsrange") AS "occurrence"
+    SELECT _rrule.occurrences("rrule", "dtstart", "duration", "tsrange") AS "occurrence"
     FROM "rrules"
     UNION
-    SELECT unnest("rruleset"."rdate") AS "occurrence"
+    SELECT tsrange(o, o + "duration", '[]') AS "occurrence" FROM unnest("rruleset"."rdate") AS o, "rrules"
   ),
   "exrules" AS (
     SELECT
       "rruleset"."dtstart",
-      "rruleset"."dtend",
-      "rruleset"."exrule"
+      "rruleset"."exrule",
+      _rrule.build_duration("rruleset"."dtstart", "rruleset"."dtend", "rruleset"."duration") AS "duration"
   ),
   "exdates" AS (
-    SELECT _rrule.occurrences("exrule", "dtstart", "tsrange") AS "occurrence"
+    SELECT _rrule.occurrences("exrule", "dtstart", "duration", "tsrange") AS "occurrence"
     FROM "exrules"
     UNION
-    SELECT unnest("rruleset"."exdate") AS "occurrence"
+    SELECT tsrange(o, o + "duration", '[]') AS "occurrence" FROM unnest("rruleset"."exdate") AS o, "rrules"
   )
   SELECT "occurrence" FROM "rdates"
   EXCEPT
@@ -563,7 +576,7 @@ RETURNS SETOF TIMESTAMP AS $$
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.occurrences("rruleset" _rrule.RRULESET)
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   SELECT _rrule.occurrences("rruleset", '(,)'::TSRANGE);
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
@@ -572,7 +585,7 @@ CREATE OR REPLACE FUNCTION _rrule.occurrences(
   "tsrange" TSRANGE
   -- TODO: add a default limit and then use that limit from `first` and `last`
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
 DECLARE
   i int;
   lim int;
@@ -581,7 +594,7 @@ BEGIN
   lim := array_length("rruleset_array", 1);
 
   IF lim IS NULL THEN
-    q := 'VALUES (NULL::TIMESTAMP) LIMIT 0;';
+    q := 'VALUES (NULL::TSRANGE) LIMIT 0;';
   ELSE
     FOR i IN 1..lim
     LOOP
@@ -612,34 +625,34 @@ RETURNS TIMESTAMP AS $$
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.first("rruleset" _rrule.RRULESET)
-RETURNS TIMESTAMP AS $$
+RETURNS TSRANGE AS $$
   SELECT occurrence
   FROM _rrule.occurrences("rruleset") occurrence
   ORDER BY occurrence ASC LIMIT 1;
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.first("rruleset_array" _rrule.RRULESET[])
-RETURNS TIMESTAMP AS $$
+RETURNS TSRANGE AS $$
   SELECT occurrence
   FROM _rrule.occurrences("rruleset_array", '(,)'::TSRANGE) occurrence
   ORDER BY occurrence ASC LIMIT 1;
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 
-CREATE OR REPLACE FUNCTION _rrule.last("rrule" _rrule.RRULE, "dtstart" TIMESTAMP)
-RETURNS TIMESTAMP AS $$
+CREATE OR REPLACE FUNCTION _rrule.last("rrule" _rrule.RRULE, "dtstart" TIMESTAMP, "duration" INTERVAL)
+RETURNS TSRANGE AS $$
   SELECT occurrence
-  FROM _rrule.occurrences("rrule", "dtstart") occurrence
+  FROM _rrule.occurrences("rrule", "dtstart", "duration") occurrence
   ORDER BY occurrence DESC LIMIT 1;
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION _rrule.last("rrule" TEXT, "dtstart" TIMESTAMP)
-RETURNS TIMESTAMP AS $$
-  SELECT _rrule.last(_rrule.rrule("rrule"), "dtstart");
+CREATE OR REPLACE FUNCTION _rrule.last("rrule" TEXT, "dtstart" TIMESTAMP, "duration" INTERVAL)
+RETURNS TSRANGE AS $$
+  SELECT _rrule.last(_rrule.rrule("rrule"), "dtstart", "duration");
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.last("rruleset" _rrule.RRULESET)
-RETURNS TIMESTAMP AS $$
+RETURNS TSRANGE AS $$
   SELECT occurrence
   FROM _rrule.occurrences("rruleset") occurrence
   ORDER BY occurrence DESC LIMIT 1;
@@ -648,14 +661,14 @@ $$ LANGUAGE SQL STRICT IMMUTABLE;
 -- TODO: Ensure to check whether the range is finite. If not, we should return null
 -- or something meaningful.
 CREATE OR REPLACE FUNCTION _rrule.last("rruleset_array" _rrule.RRULESET[])
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
 BEGIN
   IF (SELECT _rrule.is_finite("rruleset_array")) THEN
     RETURN QUERY SELECT occurrence
     FROM _rrule.occurrences("rruleset_array", '(,)'::TSRANGE) occurrence
     ORDER BY occurrence DESC LIMIT 1;
   ELSE
-    RETURN QUERY SELECT NULL::TIMESTAMP;
+    RETURN QUERY SELECT NULL::TSRANGE;
   END IF;
 END;
 $$ LANGUAGE plpgsql STRICT IMMUTABLE;
@@ -664,27 +677,28 @@ $$ LANGUAGE plpgsql STRICT IMMUTABLE;
 CREATE OR REPLACE FUNCTION _rrule.before(
   "rrule" _rrule.RRULE,
   "dtstart" TIMESTAMP,
+  "duration" INTERVAL,
   "when" TIMESTAMP
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   SELECT *
-  FROM _rrule.occurrences("rrule", "dtstart", tsrange(NULL, "when", '[]'));
+  FROM _rrule.occurrences("rrule", "dtstart", "duration", tsrange(NULL, "when", '[]'));
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION _rrule.before("rrule" TEXT, "dtstart" TIMESTAMP, "when" TIMESTAMP)
-RETURNS SETOF TIMESTAMP AS $$
-  SELECT _rrule.before(_rrule.rrule("rrule"), "dtstart", "when");
+CREATE OR REPLACE FUNCTION _rrule.before("rrule" TEXT, "dtstart" TIMESTAMP, "duration" INTERVAL, "when" TIMESTAMP)
+RETURNS SETOF TSRANGE AS $$
+  SELECT _rrule.before(_rrule.rrule("rrule"), "dtstart", "duration", "when");
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.before("rruleset" _rrule.RRULESET, "when" TIMESTAMP)
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   SELECT *
   FROM _rrule.occurrences("rruleset", tsrange(NULL, "when", '[]'));
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 -- TODO: test
 CREATE OR REPLACE FUNCTION _rrule.before("rruleset_array" _rrule.RRULESET[], "when" TIMESTAMP)
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   SELECT *
   FROM _rrule.occurrences("rruleset_array", tsrange(NULL, "when", '[]'));
 $$ LANGUAGE SQL STRICT IMMUTABLE;
@@ -694,31 +708,33 @@ $$ LANGUAGE SQL STRICT IMMUTABLE;
 CREATE OR REPLACE FUNCTION _rrule.after(
   "rrule" _rrule.RRULE,
   "dtstart" TIMESTAMP,
+  "duration" INTERVAL,
   "when" TIMESTAMP
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   SELECT *
-  FROM _rrule.occurrences("rrule", "dtstart", tsrange("when", NULL));
+  FROM _rrule.occurrences("rrule", "dtstart", "duration", tsrange("when", NULL));
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.after(
   "rrule" TEXT,
   "dtstart" TIMESTAMP,
+  "duration" INTERVAL,
   "when" TIMESTAMP
 )
-RETURNS SETOF TIMESTAMP AS $$
-  SELECT _rrule.after(_rrule.rrule("rrule"), "dtstart", "when");
+RETURNS SETOF TSRANGE AS $$
+  SELECT _rrule.after(_rrule.rrule("rrule"), "dtstart", "duration", "when");
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.after("rruleset" _rrule.RRULESET, "when" TIMESTAMP)
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   SELECT *
   FROM _rrule.occurrences("rruleset", tsrange("when", NULL));
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 -- TODO: test
 CREATE OR REPLACE FUNCTION _rrule.after("rruleset_array" _rrule.RRULESET[], "when" TIMESTAMP)
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS SETOF TSRANGE AS $$
   SELECT *
   FROM _rrule.occurrences("rruleset_array", tsrange("when", NULL));
 $$ LANGUAGE SQL STRICT IMMUTABLE;
@@ -733,7 +749,7 @@ BEGIN
   SELECT COUNT(*) > 0
   INTO inSet
   FROM _rrule.after($1, $2 - INTERVAL '1 month') "ts"
-  WHERE "ts"::date = $2::date;
+  WHERE $2 <@ "ts";
 
   RETURN inSet;
 END;
@@ -798,7 +814,8 @@ BEGIN
     _rrule.jsonb_to_rrule("rrule") "rrule",
     _rrule.jsonb_to_rrule("exrule") "exrule",
     "rdate"::TIMESTAMP[],
-    "exdate"::TIMESTAMP[]
+    "exdate"::TIMESTAMP[],
+    "duration"::INTERVAL
   INTO result
   FROM jsonb_to_record("input") as x(
     "dtstart" text,
@@ -806,7 +823,8 @@ BEGIN
     "rrule" jsonb,
     "exrule" jsonb,
     "rdate" text[],
-    "exdate" text[]
+    "exdate" text[],
+    "duration" text
   );
 
   -- TODO: validate rruleset
@@ -867,7 +885,8 @@ BEGIN
     'rrule', rrule,
     'exrule', exrule,
     'rdate', "input"."rdate",
-    'exdate', "input"."exdate"
+    'exdate', "input"."exdate",
+    'duration', "input"."duration"
   ));
 END;
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
@@ -1017,7 +1036,10 @@ CREATE CAST (TEXT AS _rrule.RRULESET)
 CREATE CAST (jsonb AS _rrule.RRULE)
   WITH FUNCTION _rrule.jsonb_to_rrule(jsonb)
   AS IMPLICIT;
-
+  
+CREATE CAST (jsonb AS _rrule.RRULESET)
+  WITH FUNCTION _rrule.jsonb_to_rruleset(jsonb)
+  AS IMPLICIT;
 
 CREATE CAST (_rrule.RRULE AS jsonb)
   WITH FUNCTION _rrule.rrule_to_jsonb(_rrule.RRULE)

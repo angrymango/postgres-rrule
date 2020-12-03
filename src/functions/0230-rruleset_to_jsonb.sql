@@ -16,7 +16,8 @@ BEGIN
     'rrule', rrule,
     'exrule', exrule,
     'rdate', "input"."rdate",
-    'exdate', "input"."exdate"
+    'exdate', "input"."exdate",
+    'duration', "input"."duration"
   ));
 END;
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;

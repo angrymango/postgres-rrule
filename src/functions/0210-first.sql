@@ -15,14 +15,14 @@ RETURNS TIMESTAMP AS $$
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.first("rruleset" _rrule.RRULESET)
-RETURNS TIMESTAMP AS $$
+RETURNS TSRANGE AS $$
   SELECT occurrence
   FROM _rrule.occurrences("rruleset") occurrence
   ORDER BY occurrence ASC LIMIT 1;
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.first("rruleset_array" _rrule.RRULESET[])
-RETURNS TIMESTAMP AS $$
+RETURNS TSRANGE AS $$
   SELECT occurrence
   FROM _rrule.occurrences("rruleset_array", '(,)'::TSRANGE) occurrence
   ORDER BY occurrence ASC LIMIT 1;
